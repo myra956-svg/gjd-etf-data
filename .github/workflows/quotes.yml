@@ -29,6 +29,6 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "chore: update quotes snapshot"
-          file_pattern: "data/quotes.json"
+          file_pattern: "data/quotes.json data/intraday.json"
           commit_user_name: "github-actions[bot]"
           commit_user_email: "github-actions[bot]@users.noreply.github.com"
