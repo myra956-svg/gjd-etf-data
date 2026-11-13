@@ -1,0 +1,42 @@
+name: daily-fetch
+
+on:
+  schedule:
+    # 北京时间 23:30 (UTC 15:30)，工作日运行；份额数据晚间发布
+    - cron: '30 15 * * 1-5'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch data (首次自动回补历史)
+        run: |
+          if [ ! -f data/history.json ]; then
+            echo "首次运行，回补最近150个自然日"
+            BEG=$(date -u -d '150 days ago' +%Y%m%d)
+            END=$(date -u +%Y%m%d)
+            python fetch_daily.py --backfill "$BEG" "$END"
+          else
+            python fetch_daily.py
+          fi
+
+      - name: Commit & push data
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update ETF data $(date -u +%Y-%m-%d)"
+          file_pattern: "data/*.json"
+          commit_user_name: "github-actions[bot]"
+          commit_user_email: "github-actions[bot]@users.noreply.github.com"
