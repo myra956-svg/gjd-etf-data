@@ -131,11 +131,56 @@ def fetch_flow_one(sess, secid):
         return 0.0
 
 
+def update_intraday(quotes):
+    """累加当前时刻跟踪池 21 只的成交额(f6)，追加到 data/intraday.json 的今日曲线。
+    每 10 分钟一个点，时间对齐到 10 分钟。"""
+    now = dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))  # 北京时间
+    date = now.strftime("%Y-%m-%d")
+    mm = (now.minute // 10) * 10
+    t = f"{now.hour:02d}:{mm:02d}"
+
+    total = 0.0
+    for secid, _ in ETFS:
+        q = quotes.get(secid)
+        if q and q.get("f6"):
+            try:
+                total += float(q["f6"])
+            except (TypeError, ValueError):
+                pass
+    if total <= 0:
+        return
+
+    ipath = os.path.join(DATA_DIR, "intraday.json")
+    data = {"ok": True, "date": date, "points": [], "hist": {}, "total_yi": 0.0}
+    if os.path.exists(ipath):
+        try:
+            with open(ipath, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {"ok": True, "date": date, "points": [], "hist": {}, "total_yi": 0.0}
+    if data.get("date") != date:
+        data = {"ok": True, "date": date, "points": [], "hist": data.get("hist", {}), "total_yi": 0.0}
+
+    pts = [p for p in (data.get("points") or []) if p.get("t") != t]
+    pts.append({"t": t, "v": round(total / 1e8, 2)})
+    pts.sort(key=lambda p: p["t"])
+    data["points"] = pts
+    data["total_yi"] = round(total / 1e8, 2)
+    data["updated"] = now.strftime("%Y-%m-%d %H:%M")
+
+    tmp = ipath + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+    os.replace(tmp, ipath)
+
+
 def run():
     sess = make_session()
     quotes, idx = fetch_quotes_and_idx(sess)
     if not quotes:
         raise RuntimeError("行情为空")
+
+    update_intraday(quotes)
 
     avg, flow = {}, {}
     for secid, code in ETFS:
