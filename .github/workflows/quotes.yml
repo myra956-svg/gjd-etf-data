@@ -1,0 +1,34 @@
+name: quotes-fetch
+
+on:
+  schedule:
+    # 盘中每 10 分钟（工作日 UTC 1:00-7:59 = 北京时间 9:00-15:59）
+    - cron: '*/10 1-7 * * 1-5'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  quotes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch quotes
+        run: python fetch_quotes.py
+
+      - name: Commit & push
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update quotes snapshot"
+          file_pattern: "data/quotes.json"
+          commit_user_name: "github-actions[bot]"
+          commit_user_email: "github-actions[bot]@users.noreply.github.com"
