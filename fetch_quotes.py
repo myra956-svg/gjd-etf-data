@@ -38,6 +38,20 @@ ETFS = [
 ]
 INDICES = [("1.000001", "上证指数"), ("0.399001", "深证成指"), ("0.399006", "创业板指"), ("1.000688", "科创50")]
 
+# 10 分钟对齐时间点（与前端 minuteIndex / intraday.hist 对齐）
+TIMES_10M = ["09:40", "09:50", "10:00", "10:10", "10:20", "10:30", "10:40", "10:50",
+             "11:00", "11:10", "11:20", "11:30",
+             "13:10", "13:20", "13:30", "13:40", "13:50", "14:00", "14:10", "14:20",
+             "14:30", "14:40", "14:50", "15:00"]
+_TIME_SET = set(TIMES_10M)
+# 5 分钟 K 线 bar 结束时刻序列（用于聚合到 10 分钟）
+_AM5 = ["09:35", "09:40", "09:45", "09:50", "09:55", "10:00", "10:05", "10:10",
+        "10:15", "10:20", "10:25", "10:30", "10:35", "10:40", "10:45", "10:50",
+        "10:55", "11:00", "11:05", "11:10", "11:15", "11:20", "11:25", "11:30"]
+_PM5 = ["13:05", "13:10", "13:15", "13:20", "13:25", "13:30", "13:35", "13:40",
+        "13:45", "13:50", "13:55", "14:00", "14:05", "14:10", "14:15", "14:20",
+        "14:25", "14:30", "14:35", "14:40", "14:45", "14:50", "14:55", "15:00"]
+
 QUOTE_FIELDS = "f2,f3,f4,f5,f6,f8,f10,f12,f13,f14,f15,f16,f17,f18"
 IDX_FIELDS = "f2,f3,f4,f12,f14"
 
@@ -174,6 +188,90 @@ def update_intraday(quotes):
     os.replace(tmp, ipath)
 
 
+def fetch_5min_today(sess, secid):
+    """抓当日 5 分钟 K 线 -> {HH:MM: 成交额(元)}"""
+    url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+    data = get_json(sess, url, {
+        "secid": secid, "klt": "5", "fqt": "1", "end": "20500101", "lmt": "48",
+        "fields1": "f1,f2,f3", "fields2": "f51,f52,f53,f54,f55,f56,f57",
+    })
+    kl = (data or {}).get("data", {}).get("klines") or []
+    out = {}
+    for line in kl:
+        p = line.split(",")
+        if len(p) < 7:
+            continue
+        parts = p[0].split(" ")
+        if len(parts) != 2:
+            continue
+        t = parts[1][:5]
+        try:
+            amt = float(p[6])
+        except ValueError:
+            continue
+        out[t] = out.get(t, 0.0) + amt
+    return out
+
+
+def agg_10min_cum(day_map):
+    """{HH:MM: 5min成交额} -> [{t, v(亿)}] 10分钟累计曲线（上午/下午分开累计）"""
+    pts = []
+    cum = 0.0
+    for t in _AM5:
+        cum += day_map.get(t, 0.0)
+        if t in _TIME_SET:
+            pts.append({"t": t, "v": round(cum / 1e8, 2)})
+    cum = 0.0
+    for t in _PM5:
+        cum += day_map.get(t, 0.0)
+        if t in _TIME_SET:
+            pts.append({"t": t, "v": round(cum / 1e8, 2)})
+    return pts
+
+
+def append_today_to_hist(sess):
+    """收盘后(15:00)：抓当日 5 分钟 K 线聚合出当日 10 分钟累计曲线，
+    追加到 intraday.json 的 hist，滚动保留最近 20 个交易日。"""
+    now = dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
+    date = now.strftime("%Y-%m-%d")
+    if now.hour < 15 or now.weekday() >= 5:
+        return
+    day_map = {}
+    for secid, _ in ETFS:
+        try:
+            m = fetch_5min_today(sess, secid)
+            for t, v in m.items():
+                day_map[t] = day_map.get(t, 0.0) + v
+        except Exception:
+            pass
+        time.sleep(0.1)
+    if not day_map:
+        return
+    pts = agg_10min_cum(day_map)
+    if len(pts) < 20:
+        return
+    ipath = os.path.join(DATA_DIR, "intraday.json")
+    data = {"ok": True, "date": date, "points": [], "hist": {}, "total_yi": 0.0}
+    if os.path.exists(ipath):
+        try:
+            with open(ipath, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {"ok": True, "date": date, "points": [], "hist": {}, "total_yi": 0.0}
+    hist = data.get("hist") or {}
+    hist[date] = pts
+    dates = sorted(hist)
+    for old in dates[:-20]:
+        hist.pop(old, None)
+    data["hist"] = hist
+    data["hist_days"] = len(hist)
+    tmp = ipath + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+    os.replace(tmp, ipath)
+    print(f"[intraday] 已追加 {date} 至 hist（共 {len(hist)} 天）")
+
+
 def run():
     sess = make_session()
     quotes, idx = fetch_quotes_and_idx(sess)
@@ -181,6 +279,7 @@ def run():
         raise RuntimeError("行情为空")
 
     update_intraday(quotes)
+    append_today_to_hist(sess)  # 收盘后追加当日曲线至 hist（滚动20天）
 
     avg, flow = {}, {}
     for secid, code in ETFS:
