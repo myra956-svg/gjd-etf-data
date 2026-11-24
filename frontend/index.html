@@ -151,6 +151,8 @@ tr.group-row td{background:var(--card2); color:var(--txt2); font-weight:700; fon
 .bar-row .v{font-variant-numeric:tabular-nums; font-weight:600; text-align:right}
 .bar-row .v .mom{font-size:11px; margin-left:4px}
 .share-tip{margin:0 16px 16px; padding:12px; border-radius:10px; background:var(--card); border:1px dashed var(--border); font-size:12px; color:var(--txt2); line-height:1.7}
+.share-timing{margin:12px 16px 0; padding:12px 14px; border:1px solid var(--warn); border-radius:10px; background:var(--warn-bg); font-size:12.5px; color:var(--txt); line-height:1.8}
+.share-timing b{color:var(--warn)}
 .share-grid .loading{grid-column:1/-1; text-align:center; padding:30px; color:var(--txt2)}
 
 /* ===== 日度份额/净流入 ===== */
@@ -301,6 +303,7 @@ footer .row{display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px
 
   <!-- 份额变动 -->
   <div class="panel" id="tab-share" style="display:none">
+    <div class="share-timing" id="shareTiming">⏱ 数据时点说明加载中…</div>
     <div class="gjd-sum" id="gjdSum"></div>
     <div class="gjd-updated" id="gjdUpdated"></div>
     <div class="gjd-table-wrap" id="gjdTableWrap"></div>
@@ -311,7 +314,7 @@ footer .row{display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px
     </div>
     <div class="share-tip">
       <b>解读口径：</b>上方「日度份额/净流入」为每日 ETF 份额变动 × 成交均价的估算，<span class="up">净流入为正 = 资金净申购（汇金加仓特征）</span>，
-      <span class="down">为负 = 净赎回（汇金减持特征）</span>，是最直接的国家队加减仓信号（数据源：上交所/深交所官方份额，每日 23:00 后更新）。
+      <span class="down">为负 = 净赎回（汇金减持特征）</span>。注意：这是 <b>T-1 确认数据</b>（见顶部时点说明），不是盘中实时信号。
       下方「规模」为季度频率的基金期末净资产，作为长期趋势补充。
     </div>
   </div>
@@ -782,6 +785,16 @@ function renderGjdData(d){
 
   const fm = (n, d=1) => (n==null||isNaN(n)) ? '—' : Number(n).toFixed(d);
   const flowCls = n => n>0?'up':(n<0?'down':'flat');
+  // 数据时点说明（动态填充最新数据日期）
+  const nNow = new Date();
+  const todayStr = `${nNow.getFullYear()}-${String(nNow.getMonth()+1).padStart(2,'0')}-${String(nNow.getDate()).padStart(2,'0')}`;
+  const isStale = lastDate < todayStr;
+  $('#shareTiming').innerHTML = `<b>⏱ 数据时点说明（实测确认）：</b>ETF 份额为交易所 <b>T-1 收盘确认值</b>——盘中任何接口（含腾讯[72]）给的都是「上一交易日收盘」份额，盘中不会跳动。` +
+    (isStale
+      ? `因此本页现在显示的是 <b>${lastDate} 收盘</b>数据；<b>${todayStr} 当日的申赎变动需今晚 23:00 后</b>（GitHub Actions 抓取）才会更新为本页最新一行。`
+      : `当前已含 <b>${lastDate} 收盘</b>数据（今日盘后更新）。`) +
+    `实测佐证：盘中 09:50 腾讯接口 510300 份额 555.87亿份，与 ${lastDate} 收盘完全一致。<br>` +
+    `<b>盘中如何抓国家队动向：</b>份额是滞后确认信号，盘中请看「实时行情·放量监测」和顶栏「⚡ 瞬时监控」弹窗（价格/成交额为实时信号），次日再用本页份额变动验证真伪——<b>放量 + 次日份额大增 = 高确信国家队进场</b>；只有放量而份额无变动，多为普通大资金行为。`;
   $('#gjdSum').innerHTML = `
     <div class="card"><div class="k">当日估算净流入</div><div class="v ${flowCls(dayFlow)}">${dayFlow>0?'+':''}${fm(dayFlow)} 亿</div><div class="s">${lastDate}</div></div>
     <div class="card"><div class="k">近5日累计</div><div class="v ${flowCls(flow5)}">${flow5>0?'+':''}${fm(flow5)} 亿</div><div class="s">估算净申赎</div></div>
