@@ -187,6 +187,22 @@ footer .row{display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px
 .toast-item .m{color:var(--txt2); font-size:12px}
 @keyframes slidein{from{transform:translateX(30px); opacity:0}to{transform:translateX(0); opacity:1}}
 
+/* ===== 瞬间放量弹窗 ===== */
+#spikeModal{position:fixed; inset:0; z-index:200; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.55);}
+#spikeModal.show{display:flex; animation:fadein .2s ease}
+.spike-card{width:min(480px,92vw); background:var(--card); border:1px solid var(--hot); border-radius:16px; padding:20px; box-shadow:0 12px 48px rgba(0,0,0,.5); animation:popin .25s ease}
+@keyframes fadein{from{opacity:0}to{opacity:1}}
+@keyframes popin{from{transform:scale(.88); opacity:0}to{transform:scale(1); opacity:1}}
+.spike-head{display:flex; align-items:center; gap:10px; font-size:16px; font-weight:800; color:var(--hot); margin-bottom:12px}
+.spike-head .time{margin-left:auto; font-size:12px; font-weight:400; color:var(--txt2)}
+.spike-row{padding:10px 12px; border:1px solid var(--border); border-left:4px solid var(--hot); border-radius:10px; margin-bottom:8px; background:var(--card2)}
+.spike-row .n{font-weight:700; font-size:14px}
+.spike-row .c{color:var(--txt3); font-size:12px; margin-left:6px}
+.spike-row .d{display:block; margin-top:4px; font-size:12.5px; color:var(--txt2)}
+.spike-row .d b{color:var(--hot)}
+.spike-foot{display:flex; gap:8px; justify-content:flex-end; margin-top:12px}
+.spike-tip{font-size:11.5px; color:var(--txt3); margin-top:4px}
+
 /* ===== 响应式 ===== */
 @media(max-width:760px){
   .indices{grid-template-columns:repeat(2,1fr)}
@@ -213,6 +229,7 @@ footer .row{display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px
       <span class="status-pill" id="statusPill"><span class="dot"></span><span id="statusText">连接中…</span></span>
     </div>
     <div class="header-actions">
+      <button class="icon-btn" id="btnSpike" title="瞬间放量监控开关：1分钟成交额≥1.5亿且为近20分钟均值3倍时弹窗">⚡ 瞬时监控·开</button>
       <button class="icon-btn" id="btnSound" title="放量预警声音">🔔 声音</button>
       <button class="icon-btn" id="btnTheme" title="切换深浅色">🌙 主题</button>
       <button class="icon-btn" id="btnRefresh">↻ 刷新</button>
@@ -324,7 +341,7 @@ footer .row{display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px
 
   <footer>
     <div class="row">
-      <span>数据源：东方财富公开行情接口（GitHub 定时抓取中转），每 5 分钟自动刷新</span>
+      <span>数据源：东方财富公开行情接口（GitHub 定时抓取中转），每 5 分钟自动刷新 · 瞬间放量监控直连新浪1分钟线，每 60 秒扫描</span>
       <span>最后刷新：<span id="lastUpdate">—</span></span>
     </div>
     <div>⚠️ 本站为个人盯盘工具，数据仅供研究参考，不构成任何投资建议。成交额放大 ≠ 一定为国家队买入，需结合行情与公告综合判断。</div>
@@ -332,6 +349,18 @@ footer .row{display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px
 </main>
 
 <div id="toast"></div>
+
+<!-- 瞬间放量弹窗 -->
+<div id="spikeModal">
+  <div class="spike-card">
+    <div class="spike-head">⚡ 瞬间放量提醒 <span class="time" id="spikeTime"></span></div>
+    <div id="spikeList"></div>
+    <div class="spike-tip">触发条件：单分钟成交额 ≥ 1.5亿 且 ≥ 近20分钟均值 × 3 · 同一只 10 分钟内不重复弹窗</div>
+    <div class="spike-foot">
+      <button class="icon-btn" id="btnSpikeClose">知道了</button>
+    </div>
+  </div>
+</div>
 
 <script>
 /* ================= 配置 ================= */
@@ -412,11 +441,20 @@ const VR_HOT = 2.0;                // 量比≥2 明显放量
 const VR_WARM = 1.5;               // 量比≥1.5 放量
 const AMT_BIG = 80e8;              // 成交额≥80亿 大额成交
 
+/* 瞬间放量监控（前端直连新浪1分钟线，不受后端10分钟节拍限制） */
+const SPIKE_POLL_MS = 60000;       // 每60秒扫一轮1分钟K线
+const SPIKE_MULT = 3;              // 当前1分钟成交额 ≥ 近20分钟均值×3 触发
+const SPIKE_MIN_AMT = 1.5e8;       // 且该分钟成交额 ≥1.5亿（过滤毛刺）
+const SPIKE_BASE_N = 20;           // 基准：最近20根完整1分钟K线
+const SPIKE_COOLDOWN = 10*60000;   // 同一只ETF 10分钟内不重复弹窗
+const SPIKE_WATCH = ALL_ETFS.filter(e=>e.core).map(e=>e.secid); // 监控核心池
+
 /* ================= 状态 ================= */
 const state = {
   quotes:{}, idx:{}, flow:{}, avg:{}, scale:{}, gjdData:null,
   trend:{today:null, hist:{}},
   sortBy:null, sound:false, alerted:new Set(),
+  spike:{on:true, last:{}, seen:new Set(), timer:null},
 };
 
 /* ================= 工具 ================= */
@@ -829,11 +867,11 @@ function checkAlerts(){
 }
 
 let audioCtx=null;
-function beep(){
+function beep(times=3){
   try{
     audioCtx = audioCtx || new (window.AudioContext||window.webkitAudioContext)();
     const t = audioCtx.currentTime;
-    for(let i=0;i<3;i++){
+    for(let i=0;i<times;i++){
       const o = audioCtx.createOscillator(), g = audioCtx.createGain();
       o.type='sine'; o.frequency.value = 880 + i*120;
       o.connect(g); g.connect(audioCtx.destination);
@@ -853,6 +891,78 @@ function toast(title, msg){
   box.appendChild(el);
   setTimeout(()=>{ el.style.opacity='0'; el.style.transition='opacity .4s'; setTimeout(()=>el.remove(),400); }, 5000);
 }
+
+/* ================= 瞬间放量监控（新浪1分钟线直连） ================= */
+function loadSinaMin(secid){
+  return new Promise(resolve=>{
+    let done=false;
+    const fin = v => { if(!done){ done=true; resolve(v||null); } };
+    const cb = '_sinacb_' + Date.now() + '_' + Math.floor(Math.random()*1e4);
+    window[cb] = data => { fin(data); try{ delete window[cb]; }catch(e){} };
+    const s = document.createElement('script');
+    s.src = `https://quotes.sina.cn/cn/api/jsonp_v2.php/${cb}/CN_MarketDataService.getKLineData?symbol=${secid}&scale=1&ma=no&datalen=${SPIKE_BASE_N+6}`;
+    s.onload = ()=> setTimeout(()=>fin(null), 80);
+    s.onerror = ()=> { try{ delete window[cb]; }catch(e){} fin(null); };
+    document.body.appendChild(s); setTimeout(()=>s.remove(), 10000);
+    setTimeout(()=>fin(null), 8000);
+  });
+}
+
+async function checkSpike(){
+  if(!state.spike.on || !marketPhase(new Date()).open) return;
+  const n = new Date();
+  const todayStr = `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
+  const results = await Promise.all(SPIKE_WATCH.map(async secid=>{
+    const bars = await loadSinaMin(secid);
+    if(!bars || !bars.length) return null;
+    const e = ALL_ETFS.find(x=>x.secid===secid);
+    if(!e) return null;
+    const today = bars.filter(b=>b.day && b.day.indexOf(todayStr)===0);
+    if(today.length < 3) return null;
+    const last = today[today.length-1];
+    const prev = today.slice(Math.max(0, today.length-1-SPIKE_BASE_N), today.length-1);
+    if(prev.length < 6) return null;
+    // 接口实际带 amount（真实成交额）；缺失时回退 volume×close 估算
+    const amtOf = b => (+b.amount||0) || ((+b.volume||0) * (+b.close||0));
+    const amt = amtOf(last);
+    const base = prev.reduce((s,b)=>s+amtOf(b), 0) / prev.length;
+    if(base<=0 || amt<SPIKE_MIN_AMT) return null;
+    const ratio = amt/base;
+    if(ratio < SPIKE_MULT) return null;
+    return {e, amt, base, ratio, time:((last.day||'').split(' ')[1]||'').slice(0,5)};
+  }));
+  const hits = results.filter(Boolean).filter(h=>{
+    const key = h.e.code + '_' + h.time;
+    if(state.spike.seen.has(key)) return false;
+    const lastT = state.spike.last[h.e.code] || 0;
+    if(Date.now() - lastT < SPIKE_COOLDOWN) return false;
+    state.spike.seen.add(key); state.spike.last[h.e.code] = Date.now();
+    return true;
+  });
+  if(hits.length) spikeAlert(hits);
+}
+
+function spikeAlert(hits){
+  const pad = x=>String(x).padStart(2,'0'); const n=new Date();
+  $('#spikeTime').textContent = `${pad(n.getHours())}:${pad(n.getMinutes())}:${pad(n.getSeconds())}`;
+  $('#spikeList').innerHTML = hits.map(h=>`<div class="spike-row">
+    <span class="n">${esc(h.e.name)}</span><span class="c">${h.e.code}</span>
+    <span class="d">${esc(h.time)} 单分钟成交 <b>${(h.amt/1e8).toFixed(2)} 亿</b> · 为近${SPIKE_BASE_N}分钟均值（${fmtYi(h.base)}）的 <b>${h.ratio.toFixed(1)} 倍</b></span>
+  </div>`).join('');
+  $('#spikeModal').classList.add('show');
+  clearTimeout(state.spike.timer);
+  state.spike.timer = setTimeout(closeSpike, 20000);
+  if(state.sound) beep(4);
+  for(const h of hits){
+    toast('瞬间放量 · ' + h.e.name, `${h.time} 1分钟 ${(h.amt/1e8).toFixed(2)}亿 · ${h.ratio.toFixed(1)}倍均量`);
+    try{
+      if(window.Notification && Notification.permission==='granted'){
+        new Notification('⚡瞬间放量 · '+h.e.name, {body:`${h.time} 单分钟成交 ${(h.amt/1e8).toFixed(2)}亿，${h.ratio.toFixed(1)}倍于近${SPIKE_BASE_N}分钟均值`});
+      }
+    }catch(e){}
+  }
+}
+function closeSpike(){ $('#spikeModal').classList.remove('show'); clearTimeout(state.spike.timer); }
 
 /* ================= 刷新主流程 ================= */
 async function refreshAll(){
@@ -892,6 +1002,10 @@ setInterval(()=>{
   refreshAll();
 }, REFRESH_MS);
 
+/* 瞬间放量轮询（仅交易时段生效） */
+setInterval(checkSpike, SPIKE_POLL_MS);
+setTimeout(checkSpike, 15000);
+
 /* ================= 交互 ================= */
 document.querySelectorAll('.tab').forEach(t => {
   t.addEventListener('click', ()=>{
@@ -915,6 +1029,21 @@ document.querySelectorAll('th.sortable').forEach(th => {
     renderQuote();
   });
 });
+
+$('#btnSpike').addEventListener('click', ()=>{
+  state.spike.on = !state.spike.on;
+  $('#btnSpike').classList.toggle('on', state.spike.on);
+  $('#btnSpike').textContent = state.spike.on ? '⚡ 瞬时监控·开' : '⚡ 瞬时监控·关';
+  if(state.spike.on){
+    checkSpike();
+    try{ if(window.Notification && Notification.permission==='default') Notification.requestPermission(); }catch(e){}
+    toast('瞬间放量监控已开启', `1分钟成交额 ≥ ${fmtYi(SPIKE_MIN_AMT)} 且为近${SPIKE_BASE_N}分钟均值 ${SPIKE_MULT} 倍时弹窗（同一只10分钟冷却）`);
+  } else {
+    closeSpike();
+  }
+});
+
+$('#btnSpikeClose').addEventListener('click', closeSpike);
 
 $('#btnSound').addEventListener('click', ()=>{
   state.sound = !state.sound;
