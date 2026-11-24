@@ -36,6 +36,18 @@ ETFS = [
     ("0.159915", "159915"), ("0.159977", "159977"), ("0.159952", "159952"),
     ("1.515800", "515800"), ("1.515850", "515850"),
 ]
+
+# 核心8只（八大宽基各取龙头）—— 与前端 CORE8 保持一致；改这里即可换名单
+CORE8 = [
+    "1.510300",  # 沪深300
+    "1.510050",  # 上证50
+    "1.510180",  # 上证180
+    "1.510500",  # 中证500
+    "1.512100",  # 中证1000
+    "1.588000",  # 科创50
+    "0.159915",  # 创业板
+    "1.515800",  # 中证800
+]
 INDICES = [("1.000001", "上证指数"), ("0.399001", "深证成指"), ("0.399006", "创业板指"), ("1.000688", "科创50")]
 
 # 10 分钟对齐时间点（与前端 minuteIndex / intraday.hist 对齐）
@@ -145,41 +157,56 @@ def fetch_flow_one(sess, secid):
         return 0.0
 
 
-def update_intraday(quotes):
-    """累加当前时刻跟踪池 21 只的成交额(f6)，追加到 data/intraday.json 的今日曲线。
-    每 10 分钟一个点，时间对齐到 10 分钟。"""
-    now = dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))  # 北京时间
-    date = now.strftime("%Y-%m-%d")
-    mm = (now.minute // 10) * 10
-    t = f"{now.hour:02d}:{mm:02d}"
-
+def sum_amt(quotes, secids):
+    """累加指定 secid 列表的当日成交额(f6)，单位：元"""
     total = 0.0
-    for secid, _ in ETFS:
+    for secid in secids:
         q = quotes.get(secid)
         if q and q.get("f6"):
             try:
                 total += float(q["f6"])
             except (TypeError, ValueError):
                 pass
+    return total
+
+
+def update_intraday(quotes):
+    """累加当前时刻成交额，追加到 data/intraday.json 的今日曲线。
+    同时维护全池21只(points)与核心8只(points8)，每 10 分钟一个点。"""
+    now = dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))  # 北京时间
+    date = now.strftime("%Y-%m-%d")
+    mm = (now.minute // 10) * 10
+    t = f"{now.hour:02d}:{mm:02d}"
+
+    total = sum_amt(quotes, [s for s, _ in ETFS])
+    total8 = sum_amt(quotes, CORE8)
     if total <= 0:
         return
 
     ipath = os.path.join(DATA_DIR, "intraday.json")
-    data = {"ok": True, "date": date, "points": [], "hist": {}, "total_yi": 0.0}
+    data = {"ok": True, "date": date, "points": [], "points8": [], "hist": {}, "hist8": {}, "total_yi": 0.0, "total8_yi": 0.0}
     if os.path.exists(ipath):
         try:
             with open(ipath, encoding="utf-8") as f:
                 data = json.load(f)
         except Exception:
-            data = {"ok": True, "date": date, "points": [], "hist": {}, "total_yi": 0.0}
+            data = {"ok": True, "date": date, "points": [], "points8": [], "hist": {}, "hist8": {}, "total_yi": 0.0, "total8_yi": 0.0}
     if data.get("date") != date:
-        data = {"ok": True, "date": date, "points": [], "hist": data.get("hist", {}), "total_yi": 0.0}
+        data = {"ok": True, "date": date, "points": [], "points8": [],
+                "hist": data.get("hist", {}), "hist8": data.get("hist8", {}),
+                "total_yi": 0.0, "total8_yi": 0.0}
 
-    pts = [p for p in (data.get("points") or []) if p.get("t") != t]
-    pts.append({"t": t, "v": round(total / 1e8, 2)})
-    pts.sort(key=lambda p: p["t"])
-    data["points"] = pts
+    def upd(pts, v):
+        lst = [p for p in (pts or []) if p.get("t") != t]
+        lst.append({"t": t, "v": round(v / 1e8, 2)})
+        lst.sort(key=lambda p: p["t"])
+        return lst
+
+    data["points"] = upd(data.get("points"), total)
+    if total8 > 0:
+        data["points8"] = upd(data.get("points8"), total8)
     data["total_yi"] = round(total / 1e8, 2)
+    data["total8_yi"] = round(total8 / 1e8, 2)
     data["updated"] = now.strftime("%Y-%m-%d %H:%M")
 
     tmp = ipath + ".tmp"
@@ -231,45 +258,56 @@ def agg_10min_cum(day_map):
 
 def append_today_to_hist(sess):
     """收盘后(15:00)：抓当日 5 分钟 K 线聚合出当日 10 分钟累计曲线，
-    追加到 intraday.json 的 hist，滚动保留最近 20 个交易日。"""
+    追加到 intraday.json 的 hist / hist8（核心8只），各自滚动保留最近 20 个交易日。"""
     now = dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
     date = now.strftime("%Y-%m-%d")
     if now.hour < 15 or now.weekday() >= 5:
         return
-    day_map = {}
-    for secid, _ in ETFS:
-        try:
-            m = fetch_5min_today(sess, secid)
-            for t, v in m.items():
-                day_map[t] = day_map.get(t, 0.0) + v
-        except Exception:
-            pass
-        time.sleep(0.1)
-    if not day_map:
-        return
-    pts = agg_10min_cum(day_map)
-    if len(pts) < 20:
-        return
+
+    def collect(secids):
+        day_map = {}
+        for secid in secids:
+            try:
+                m = fetch_5min_today(sess, secid)
+                for t, v in m.items():
+                    day_map[t] = day_map.get(t, 0.0) + v
+            except Exception:
+                pass
+            time.sleep(0.1)
+        return day_map
+
+    pool_map = collect([s for s, _ in ETFS])
+    core8_map = collect(CORE8)
     ipath = os.path.join(DATA_DIR, "intraday.json")
-    data = {"ok": True, "date": date, "points": [], "hist": {}, "total_yi": 0.0}
+    data = {"ok": True, "date": date, "points": [], "points8": [], "hist": {}, "hist8": {}, "total_yi": 0.0, "total8_yi": 0.0}
     if os.path.exists(ipath):
         try:
             with open(ipath, encoding="utf-8") as f:
                 data = json.load(f)
         except Exception:
-            data = {"ok": True, "date": date, "points": [], "hist": {}, "total_yi": 0.0}
-    hist = data.get("hist") or {}
-    hist[date] = pts
-    dates = sorted(hist)
-    for old in dates[:-20]:
-        hist.pop(old, None)
-    data["hist"] = hist
-    data["hist_days"] = len(hist)
+            pass
+
+    def append_hist(hist, day_map, tag):
+        if not day_map:
+            return hist
+        pts = agg_10min_cum(day_map)
+        if len(pts) < 20:
+            return hist
+        hist = dict(hist or {})
+        hist[date] = pts
+        dates = sorted(hist)
+        for old in dates[:-20]:
+            hist.pop(old, None)
+        print(f"[intraday] 已追加 {date} 至 {tag}（共 {len(hist)} 天）")
+        return hist
+
+    data["hist"] = append_hist(data.get("hist"), pool_map, "hist")
+    data["hist8"] = append_hist(data.get("hist8"), core8_map, "hist8")
+    data["hist_days"] = len(data.get("hist") or {})
     tmp = ipath + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
     os.replace(tmp, ipath)
-    print(f"[intraday] 已追加 {date} 至 hist（共 {len(hist)} 天）")
 
 
 def run():
