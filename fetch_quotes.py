@@ -114,13 +114,51 @@ def fetch_quotes_and_idx(sess):
         quotes[f"{f13}.{f12}"] = {k: d.get(k) for k in
                                   ("f2", "f3", "f4", "f5", "f6", "f8", "f10", "f12", "f13", "f14", "f15", "f16", "f17", "f18")}
     idx = {}
-    diff2 = fetch_ulist(sess, ",".join(s for s, _ in INDICES), IDX_FIELDS)
-    for d in diff2:
-        f12, f13 = d.get("f12"), d.get("f13")
-        if f12 is None or f13 is None:
-            continue
-        idx[f"{f13}.{f12}"] = {k: d.get(k) for k in ("f2", "f3", "f4", "f12", "f14")}
+    try:
+        diff2 = fetch_ulist(sess, ",".join(s for s, _ in INDICES), IDX_FIELDS)
+        for d in diff2:
+            f12, f13 = d.get("f12"), d.get("f13")
+            if f12 is None or f13 is None:
+                continue
+            idx[f"{f13}.{f12}"] = {k: d.get(k) for k in ("f2", "f3", "f4", "f12", "f14")}
+    except Exception as e:
+        print(f"[quotes] warn: 东财指数获取失败({e})，尝试腾讯兜底")
+    if len(idx) < len(INDICES):
+        # 兑底：腾讯行情（东财对海外 IP 可能不给指数数据；ETF 正常）
+        idx.update(fetch_idx_tencent(idx))
     return quotes, idx
+
+
+def fetch_idx_tencent(existing):
+    """腾讯 qt.gtimg.cn 兜底抓指数，返回与东财 idx 同构的 dict。
+    INDICES 元素形如 ("1.000001", "上证指数")（secid, 名称）。
+    腾讯 s_ 简化格式字段：[1]名称 [2]代码 [3]现价 [4]涨跌额 [5]涨跌幅"""
+    out = {}
+    try:
+        q = ",".join(f"s_{'sh' if s.startswith('1.') else 'sz'}{s.split('.')[1]}" for s, _ in INDICES)
+        r = requests.get(f"https://qt.gtimg.cn/q={q}", timeout=TIMEOUT)
+        r.encoding = "gbk"
+        name_of = {s.split(".")[1]: n for s, n in INDICES}
+        secid_of = {s.split(".")[1]: s for s, _ in INDICES}
+        have = {e.split(".")[1] for e in existing}
+        for part in r.text.split(";"):
+            p = part.split("=")
+            if len(p) < 2 or "~" not in p[1]:
+                continue
+            f = p[1].split("~")
+            if len(f) < 6:
+                continue
+            code = f[2]
+            if code not in name_of or code in have:
+                continue
+            out[secid_of[code]] = {
+                "f2": float(f[3]), "f3": float(f[5]), "f4": float(f[4]),
+                "f12": code, "f14": name_of[code],
+            }
+        print(f"[quotes] 腾讯兜底指数: {len(out)} 只")
+    except Exception as e:
+        print(f"[quotes] warn: 腾讯指数兜底也失败: {e}")
+    return out
 
 
 def fetch_avg_one(sess, secid):
